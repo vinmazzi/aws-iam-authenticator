@@ -32,6 +32,7 @@ var tokenCmd = &cobra.Command{
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
 		roleARN := viper.GetString("role")
+		user    := viper.GetString("user")
 		clusterID := viper.GetString("clusterID")
 		tokenOnly := viper.GetBool("tokenOnly")
 		forwardSessionName := viper.GetBool("forwardSessionName")
@@ -50,7 +51,9 @@ var tokenCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "could not get token: %v\n", err)
 			os.Exit(1)
 		}
-		if roleARN != "" {
+		if (roleARN != "" && user != "") {
+			tok, err = gen.GetWithRoleAndUser(clusterID, roleARN, user)
+                } else if roleARN != "" {
 			// if a role was provided, assume that role for the token
 			tok, err = gen.GetWithRole(clusterID, roleARN)
 		} else {
@@ -73,11 +76,13 @@ var tokenCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(tokenCmd)
 	tokenCmd.Flags().StringP("role", "r", "", "Assume an IAM Role ARN before signing this token")
+	tokenCmd.Flags().StringP("user", "u", "", "Assume an IAM Role ARN using the username as a session name")
 	tokenCmd.Flags().Bool("token-only", false, "Return only the token for use with Bearer token based tools")
 	tokenCmd.Flags().Bool("forward-session-name",
 		false,
 		"Enable mapping a federated sessions caller-specified-role-name attribute onto newly assumed sessions. NOTE: Only applicable when a new role is requested via --role")
 	viper.BindPFlag("role", tokenCmd.Flags().Lookup("role"))
+	viper.BindPFlag("user", tokenCmd.Flags().Lookup("user"))
 	viper.BindPFlag("tokenOnly", tokenCmd.Flags().Lookup("token-only"))
 	viper.BindPFlag("forwardSessionName", tokenCmd.Flags().Lookup("forward-session-name"))
 	viper.BindEnv("role", "DEFAULT_ROLE")

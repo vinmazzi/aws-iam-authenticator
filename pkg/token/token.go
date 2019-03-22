@@ -146,6 +146,7 @@ type Generator interface {
 	Get(string) (Token, error)
 	// GetWithRole creates a token by assuming the provided role, using the credentials in the default chain.
 	GetWithRole(clusterID, roleARN string) (Token, error)
+	GetWithRoleAndUser(clusterID, roleARN string, user string) (Token, error)
 	// GetWithRoleForSession creates a token by assuming the provided role, using the provided session.
 	GetWithRoleForSession(clusterID string, roleARN string, sess *session.Session) (Token, error)
 	// GetWithSTS returns a token valid for clusterID using the given STS client.
@@ -180,6 +181,21 @@ func StdinStderrTokenProvider() (string, error) {
 
 // GetWithRole assumes the given AWS IAM role and returns a token valid for
 // clusterID. If roleARN is empty, behaves like Get (does not assume a role).
+
+func (g generator) GetWithRoleAndUser(clusterID string, roleARN string, user string) (Token, error) {
+	// create a session with the "base" credentials available
+	// (from environment variable, profile files, EC2 metadata, etc)
+	sess, err := session.NewSessionWithOptions(session.Options{
+		AssumeRoleTokenProvider: StdinStderrTokenProvider,
+		SharedConfigState:       session.SharedConfigEnable,
+	})
+	if err != nil {
+		return Token{}, fmt.Errorf("could not create session: %v", err)
+	}
+
+	return g.GetWithRoleAndUserForSession(clusterID, roleARN, sess, user)
+}
+
 func (g generator) GetWithRole(clusterID string, roleARN string) (Token, error) {
 	// create a session with the "base" credentials available
 	// (from environment variable, profile files, EC2 metadata, etc)
@@ -192,6 +208,51 @@ func (g generator) GetWithRole(clusterID string, roleARN string) (Token, error) 
 	}
 
 	return g.GetWithRoleForSession(clusterID, roleARN, sess)
+}
+
+func (g generator) GetWithRoleAndUserForSession(clusterID string, roleARN string, sess *session.Session, user string) (Token, error) {
+	// use an STS client based on the direct credentials
+	stsAPI := sts.New(sess)
+
+	input := &sts.GetCallerIdentityInput{}
+	result, err := stsAPI.GetCallerIdentity(input)
+	username := strings.Split(*result.Arn, "/")[1]
+
+	if err != nil {
+		fmt.Errorf(err.Error())
+	}
+
+	// if a roleARN was specified, replace the STS client with one that uses
+	// temporary credentials from that role.
+	if roleARN != "" && username == user {
+		sessionSetter := func(provider *stscreds.AssumeRoleProvider) {
+			provider.RoleSessionName = user
+		}
+		if g.forwardSessionName {
+			// If the current session is already a federated identity, carry through
+			// this session name onto the new session to provide better debugging
+			// capabilities
+			resp, err := stsAPI.GetCallerIdentity(&sts.GetCallerIdentityInput{})
+			if err != nil {
+				return Token{}, err
+			}
+
+			userIDParts := strings.Split(*resp.UserId, ":")
+			sessionSetter = func(provider *stscreds.AssumeRoleProvider) {
+				if len(userIDParts) == 2 {
+					provider.RoleSessionName = userIDParts[1]
+				}
+			}
+		}
+
+		// create STS-based credentials that will assume the given role
+		creds := stscreds.NewCredentials(sess, roleARN, sessionSetter)
+
+		// create an STS API interface that uses the assumed role's temporary credentials
+		stsAPI = sts.New(sess, &aws.Config{Credentials: creds})
+	}
+
+	return g.GetWithSTS(clusterID, stsAPI)
 }
 
 // GetWithRole assumes the given AWS IAM role for the given session and behaves
